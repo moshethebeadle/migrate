@@ -1,6 +1,8 @@
 package spanner
 
 import (
+	context2 "context"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -145,17 +147,47 @@ func (s *Spanner) Run(migration io.Reader) error {
 	stmts := migrationStatements(migr)
 	ctx := context.Background()
 
-	op, err := s.db.admin.UpdateDatabaseDdl(ctx, &adminpb.UpdateDatabaseDdlRequest{
-		Database:   s.config.DatabaseName,
-		Statements: stmts,
+	isDML, err := isDML(stmts)
+	if err != nil {
+		return &database.Error{OrigErr: err, Err: "error checking if DML or DDL", Query: migr}
+	}
+
+	if !isDML {
+
+		// DDL
+
+		op, err := s.db.admin.UpdateDatabaseDdl(ctx, &adminpb.UpdateDatabaseDdlRequest{
+			Database:   s.config.DatabaseName,
+			Statements: stmts,
+		})
+
+		if err != nil {
+			return &database.Error{OrigErr: err, Err: "DDL migration failed", Query: migr}
+		}
+
+		if err := op.Wait(ctx); err != nil {
+			return &database.Error{OrigErr: err, Err: "DDL migration failed", Query: migr}
+		}
+
+		return nil
+	}
+
+	// DML
+
+	_, err = s.db.data.ReadWriteTransaction(ctx, func(ctxSpanner context2.Context, txn *spanner.ReadWriteTransaction) error {
+		var stmtsSpanner []spanner.Statement
+		for _, stmt := range stmts {
+			stmtsSpanner = append(stmtsSpanner, spanner.NewStatement(stmt))
+		}
+
+		if _, err := txn.BatchUpdate(ctxSpanner, stmtsSpanner); err != nil {
+			return fmt.Errorf("batch update: %w", err)
+		}
+		return nil
 	})
 
 	if err != nil {
-		return &database.Error{OrigErr: err, Err: "migration failed", Query: migr}
-	}
-
-	if err := op.Wait(ctx); err != nil {
-		return &database.Error{OrigErr: err, Err: "migration failed", Query: migr}
+		return &database.Error{OrigErr: err, Err: "DML migration failed", Query: migr}
 	}
 
 	return nil
@@ -315,4 +347,18 @@ func migrationStatements(migration []byte) []string {
 		}
 	}
 	return nonEmptyStatements
+}
+
+func isDML(stmts []string) (bool, error) {
+	if len(stmts) == 0 {
+		return false, errors.New("no statements found")
+	}
+
+	firstWord := strings.ToUpper(strings.Trim(stmts[0], " \t\r\n"))
+	for _, dmlKeyword := range [4]string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
+		if strings.HasPrefix(firstWord, dmlKeyword) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

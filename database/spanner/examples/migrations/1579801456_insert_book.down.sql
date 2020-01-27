@@ -1,0 +1,1 @@
+DELETE FROM Books WHERE UserId = 1

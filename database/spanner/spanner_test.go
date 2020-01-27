@@ -55,6 +55,7 @@ func TestMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	dt.TestMigrate(t, m)
 }
 
